@@ -263,7 +263,7 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:3px
 <div class="toast" id="toast"></div>
 <script type="module">
 import{initializeApp}from"https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js";
-import{getFirestore,collection,doc,getDocs,addDoc,updateDoc,deleteDoc,writeBatch,onSnapshot,query,orderBy}from"https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js";
+import{getFirestore,collection,doc,getDocs,addDoc,updateDoc,deleteDoc,writeBatch,onSnapshot,query,orderBy,increment,runTransaction}from"https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js";
 
 // ▼▼▼ FIREBASE CONFIG (project: xmas-bash-cafe) ▼▼▼
 const firebaseConfig={
@@ -457,7 +457,26 @@ window.adjust=async function(id,delta){
   // so re-render after a beat — the user sees the count land on 0 before it moves down.
   const crossedZero=(nv===0&&prevCount>0)||(nv>0&&prevCount===0);
   if(mode==="cashier"&&crossedZero){setTimeout(()=>{if(mode==="cashier")renderItems();},450);}
-  try{await updateDoc(doc(db,COL,id),{count:nv});}catch(e){showToast("Save failed");item.count-=delta;renderItems();}
+  // Send the CHANGE (not the final number) so simultaneous taps from several phones are never lost.
+  const ref=doc(db,COL,id);
+  try{
+    if(delta>0){
+      await updateDoc(ref,{count:increment(delta)});
+    }else{
+      // Minus: Firebase checks the live count first, so two cashiers can never push it below 0.
+      await runTransaction(db,async tx=>{
+        const snap=await tx.get(ref);
+        if(!snap.exists())throw new Error("GONE");
+        const cur=snap.data().count||0;
+        if(cur+delta<0)throw new Error("SOLD_OUT");
+        tx.update(ref,{count:increment(delta)});
+      });
+    }
+  }catch(e){
+    if(e.message==="SOLD_OUT"){showToast(item.name+" is already sold out");hapticHeavy();}
+    else if(e.message==="GONE"){showToast("Item was removed");}
+    else{showToast("Save failed — check connection");item.count=prevCount;renderItems();updateAlert();}
+  }
 };
 
 window.cashierTap=function(id,ev){
